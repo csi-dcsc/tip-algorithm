@@ -1,18 +1,19 @@
-%% TIP Algorithm (Basic Version)
+%% TIP Algorithm 
 % Matlab Version 1.0
-% Dean Wilding (c) 2016
+% Dean Wilding, Oleg Soloviev (c) 2016-17
 % Available freely under the terms of GNU GPL
 
 
 %% Initialization
+clear all;
+
 % Algorithm Parameters
 N = 512;
 M = 512;
 D = 4;
 nIter = 10;
-aperture = 0.45;
-lb = 0.15;
-ub = 1.0;
+psf_size = 11;
+compression = 1;
 eps = 1e-15;
 
 % Load images
@@ -23,18 +24,42 @@ for d=0:3
     z(:,:,d+1) = img;
 end
 
+% Apply "compression"
+z_copy = z;
+z = z(uint64(N/2-N/2/compression)+1:uint64(N/2+N/2/compression),uint64(M/2-M/2/compression)+1:uint64(M/2+M/2/compression),:);
+
+N = uint64(N / compression);
+M = uint64(M / compression);
+
 % Load object
 obj = im2double(imread('inputs/mountain/object.tif'));
 obj = obj ./ max(max(obj));
 
 % Spatial grid
-x = -1.0:(2.0/(N-1)):1.0;
-y = -1.0:(2.0/(N-1)):1.0;
+x = linspace(-1.0,1.0,N);
+y = linspace(-1.0,1.0,M);
 [X,Y] = meshgrid(x,y);
 RHO = sqrt(X.^2+Y.^2);
 
-% Spatial filters
-filter = double((RHO < 2*aperture) .* ones(N,M));
+% Create basis functions (these may be saved to disk)
+mask = (RHO < (double(psf_size) / double(N))) .* ones(N,M);
+K = uint64(sum(sum(mask)));
+
+A = zeros(M * N, K);
+for i=1:K
+    f = zeros(N, M);
+    [maxX, idxX] = max(mask);
+    [maxY, idxY] = max(maxX);
+    px = idxX(idxY);
+    py = idxY;
+    f(px, py) = 1;
+    mask(px, py) = 0;
+    F = ift(f);
+    A(:, i) = reshape(F,M * N,1);
+end
+
+% Invert the matrix
+Ainv = pinv(A);
 
 % Compute the OTFs and apply the filters
 % Generate starting OTFs - blind
@@ -43,41 +68,51 @@ Z = zeros(N, M, D);
 
 for d=1:D
     Z(:,:,d) = ift(z(:,:,d));
-    Z(:,:,d) = Z(:,:,d) .* filter;
-    H(:,:,d) = H(:,:,d) .* filter;
 end
-
-% Initial Object Spectrum
-O = ones(N, M);
 
 %% Main algorithm loop
 for i=1:nIter
     O = least_squares(H, Z, eps);
     for d=1:D
-        H(:,:,d) = Z(:,:,d) .* conj(O) ./ (abs(O).^2 + eps);
-        H(:,:,d) = realize(H(:,:,d),filter,lb,ub);
+        H(:,:,d) = Z(:,:,d) ./ (O + eps);
+        alpha = real(Ainv * reshape(H(:,:,d),M*N,1));
+        alpha(alpha < 0) = 0;
+        H(:,:,d) = reshape(A * alpha,N,M);
     end
 end
 
-%% Final step: final deconvolution
-O = zeros(N,M);
-O = least_squares(H, Z, eps) .* filter;
-o = real(ft(O));
-O = ift(o);
-o = real(ft(O));
-o = o - min(min(o));
-o = o ./ max(max(o));
-
 %% PSFs
+N = uint64(N*compression);
+M = uint64(M*compression);
 h = zeros(N,M,D);
 for d=1:D
-    h(:,:,d) = real(ft(H(:,:,d)));
+    h(uint64(N/2-N/2/compression)+1:uint64(N/2+N/2/compression),uint64(M/2-M/2/compression)+1:uint64(M/2+M/2/compression),d) = real(ft(H(:,:,d)));
+end
+
+%% Final step: final deconvolution (full-size)
+z = z_copy;
+Z = zeros(N, M, D);
+H = zeros(N, M, D);
+for d=1:D
+    Z(:,:,d) = ift(z(:,:,d));
+    H(:,:,d) = ift(h(:,:,d));
+end
+
+O = least_squares(H, Z, eps);
+o = real(ft(O));
+
+% Threshold and normalization
+o(o<0) = 0;
+o = o / max(max(o));
+
+for d=1:D
     h(:,:,d) = h(:,:,d) ./ max(max(h(:,:,d)));
     h(:,:,d) = h(:,:,d) .* (h(:,:,d) >= 0.0);
 end
 
 %% Display Outputs
 % Images
+figure;
 subplot(3,4,1)
 imshow(z(:,:,1), [0 1.0]);
 title('Image 1')
@@ -105,10 +140,10 @@ imshow(h(N/2-10:N/2+10,M/2-10:M/2+10,4), [0 1.0]);
 title('PSF 4')
 % Objects
 subplot(3,4,9)
-imshow(log(abs(O)/max(max(abs(O)))));
+imshow(log(abs(O)/max(max(abs(O)))),[]);
 title('O Spectra Amp.')
 subplot(3,4,10)
-imshow(angle(O));
+imshow(angle(O),[]);
 title('O Spectra Phase')
 subplot(3,4,11)
 imshow(o, [0 1.0]);

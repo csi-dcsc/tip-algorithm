@@ -1,101 +1,99 @@
 import numpy as np
 import scipy.fftpack
-import os
+import os, os.path
 import PIL.Image as pil
 import scipy.misc
 import scipy.ndimage
 import scipy.signal
+import time
 
 class tip():
 
-    def __init__(self, path, nIter, nFrames, ROI):
+    def __init__(self, path, nIter, nFrames, compression, scale, psf_size, save_basis):
 
         # Load the files from the directory
         files = os.listdir(path)
         test = np.array(pil.open(path + files[0]))
         N, M = test.shape
 
+        print "Starting TIP Algorithm --- loading from directory '{}' ".format(path)
+        print "PSF Support Size = {}".format(psf_size)
+        print "Number of Frames = {}".format(nFrames)
+        print "Number of Frames = {}".format(nIter)
+        print "Processing Compression = {}".format(compression)
+        print "Interpolation = {}".format(scale)
+        if save_basis == True:
+            if os.path.isdir('./base/') == False:
+                os.mkdir('./base/')
+            print "Basis files will be saved to ./base/"
+
         # Expected image dimensions
-        self.N = N
-        self.M = M
-        self.D = nFrames
-        self.ROI = ROI  # ( x , y , w , h )
+        self.N = int(N * scale)          # Grid Size
+        self.M = int(M * scale)          # Grid Size
+        self.D = nFrames                 # Number of Frames to load
+        self.compression = compression   # The reduction in the size used for the calculation
+        self.scale = scale               # Down/Up-scaling for the deconvolution
+        self.nIter = nIter               # Number of iterations desired
+        self.psf_size = psf_size         # a priori PSF size
+        self.save_basis = save_basis     # Boolean for saving the basis
 
-        # Number of iterations desired
-        self.nIter = nIter
+        if self.N % 2 != 0:
+            self.N += 1
+        if self.M % 2 != 0:
+            self.M += 1
 
-        self.i = np.zeros((self.D,N,M))
+        # Load the images from the directory into memory / scale
+        self.i = np.zeros((self.D,self.N,self.M))
         for d in range(0,self.D):
-            self.i[d] = np.array(pil.open(path+files[d])).astype('float')
+            self.i[d] = scipy.misc.imresize(np.array(pil.open(path+files[d])).astype('float'),(self.N,self.M))
 
-        # Apply ROI
-        self.i = self.i[:,ROI[0]:ROI[0]+ROI[2],ROI[1]:ROI[1]+ROI[3]]
-        self.N = ROI[2]
-        self.M = ROI[3]
+        print "Found {} images ({}x{})".format(self.D,self.N,self.M)
 
-        # Imaging tiling if the sizes are not the same (helps with F.T. issues)
-        if self.N > self.M:
-            self.ratio = self.N / self.M
-            self.N_o = np.copy(self.N)
-            self.M_o = np.copy(self.M)
-            i = np.zeros((self.D, N, N))
-            for d in range(0, self.D):
-                for k in range(0,int(self.ratio)):
-                    i[d,:,k*self.M:(k+1)*self.M] = self.i[d]
-            self.D, self.N, self.M = i.shape
-            self.i = i
-            self.cut = True
-        elif self.M > self.N:
-            self.ratio = self.M / self.N
-            self.N_o = np.copy(self.N)
-            self.M_o = np.copy(self.M)
-            i = np.zeros((self.D, M, M))
-            for d in range(0, self.D):
-                for k in range(0, int(self.ratio)):
-                    i[d,k * self.N:(k + 1) * self.N,:] = self.i[d]
-            self.D, self.N, self.M = i.shape
-            self.i = i
-            self.cut = True
+        # Calculate the new array size
+        self.N = int(float(self.N) / self.compression)
+        self.M = int(float(self.M) / self.compression)
+
+        if self.N % 2 != 0:
+            self.N += 1
+        if self.M % 2 != 0:
+            self.M += 1
+
+        # Check if it has already been created
+        if os.path.isfile('base/A_{}x{}_{}.npy'.format(self.N, self.M, self.psf_size)):
+            print "Basis file exists.  Loading from file."
+            self.A = np.load('base/A_{}x{}_{}.npy'.format(self.N, self.M, self.psf_size))
+            self.Ainv = np.load('base/Ainv_{}x{}_{}.npy'.format(self.N, self.M, self.psf_size))
+            print "Complete."
         else:
-            self.cut = False
+            print "Basis file does not exists.  Creating file."
+            # Create aperture grid
+            x = np.linspace(-1.0, 1.0, self.N)
+            y = np.linspace(-1.0, 1.0, self.M)
+            X, Y = np.meshgrid(y, x)
+            RHO = np.sqrt(X ** 2 + Y ** 2)
 
-        # Normalization
-        for d in range(0, self.D):
-            self.i[d] = self.i[d] / np.sum(self.i[d]) * self.N*self.M
+            mask = (RHO < (float(self.psf_size) / (self.N))).astype('uint8')
+            M = int(np.sum(mask))
 
-        # Space
-        px = np.linspace(-1.0, 1.0, self.N)
-        py = np.linspace(-1.0 * float(self.M) / float(self.N), 1.0 * float(self.M) / float(self.N), self.M)
-        X, Y = np.meshgrid(py, px)
-        self.RHO = np.sqrt(X ** 2 + Y ** 2)
-        del px, py, X, Y
+            self.A = np.zeros((self.M * self.N, M), dtype='complex')
+            for i in range(0, M):
+                f = np.zeros((self.N, self.M))
+                px, py = np.unravel_index(np.argmax(mask), mask.shape)
+                f[px, py] = 1.0
+                mask[px, py] = 0.0
+                F = self.ift(f)
+                self.A[:, i] = F.reshape(self.M * self.N)
 
+            self.Ainv = np.linalg.pinv(self.A)
 
-        ## Default Constraints
-        # Bounds on the PSF values
-        self.psf_lb = 0.20
-        self.psf_ub = 1.00
+            if self.save_basis == True:
+                print 'Saving file. '
+                np.save('base/A_{}x{}_{}'.format(self.N, self.M, self.psf_size), self.A)
+                np.save('base/Ainv_{}x{}_{}'.format(self.N, self.M, self.psf_size), self.Ainv)
 
-        # Aperture Estimate
-        self.aperture = 0.9
+            print "Complete."
 
-        # Spectral filters
-        self.filter = np.ones((self.N, self.M)) * (self.RHO < 2*self.aperture)
-        self.filter_psf = np.ones((self.N, self.M)) * (self.RHO < 2*self.aperture)
-
-        # Apodization of Images
-        self.apodize = False
-        self.apod_distance = 0.75
-        self.apod_width = 0.05
-
-        # Padding
-        self.padding_ratio = 1.00
-
-        # Printing
-        self.printing = False
-
-        # Divisor Limit
-        self.eps = 1e-15
+        print "Start up complete."
 
         return
 
@@ -109,110 +107,73 @@ class tip():
         r = np.sum(np.abs(a) ** 2) / np.sum(np.abs(A) ** 2)
         return r * A
 
-    def ls(self, H, F, eps=0.0): # Least-squares solution
+    def ls(self, H, F): # Least-squares solution
         D, N, M = H.shape
         A = np.zeros((N, M), dtype='complex128')
         B = np.zeros((N, M), dtype='complex128')
         for d in range(0, D):
             A += H[d].conj() * F[d]
             B += np.abs(H[d]) ** 2
-        B = B + eps
+        B = B + 1e-15
         G = self.divide(A, B)
         return G
-
-    def realize(self, F, filter, lb, ub): # Projection Operator
-        f = np.real(self.ft(F * filter))
-        f = f / f.max()
-        f = (f * (f >= lb) * (f <= ub))
-        F = self.ift(f)
-        return F
 
     def divide(self, A, B):  # Safe division
         if type(A) == float:
             out = np.zeros(B.shape, dtype='complex128')
-            out[B != 0] = A / B[B != 0]
+            out[np.abs(B) > np.max(np.abs(B))*1e-11] = A[np.abs(B) > np.max(np.abs(B))*1e-11] / B[np.abs(B) > np.max(np.abs(B))*1e-11]
         else:
             out = np.zeros(A.shape, dtype='complex128')
-            out[B != 0] = A[B != 0] / B[B != 0]
+            out[np.abs(B) > np.max(np.abs(B))*1e-11] = A[np.abs(B) > np.max(np.abs(B))*1e-11] / B[np.abs(B) > np.max(np.abs(B))*1e-11]
         return out
 
-    def remake_filters(self):
-        self.filter = np.ones((self.N, self.M)) * (self.RHO < 2*self.aperture)
-        self.filter_psf = np.ones((self.N, self.M)) * (self.RHO < 2*self.aperture)
+    def deconvolve(self): # Main deconvolution command
 
-    def deconvolve(self):
+        # Record starting time
+        t1 = time.time()
 
-        i_copy = np.copy(self.i)
+        # Create a working copy cropped to the compression size
+        D,N,M = self.i.shape
+        i = np.copy(self.i[:,N/2-self.N/2:N/2+self.N/2,M/2-self.M/2:N/2+self.M/2])
 
-        # Add the padding to the image arrays
-        N = int(self.N / self.padding_ratio)
-        M = int(self.M / self.padding_ratio)
-
-        i = np.zeros((self.D,N,M))
-        filter = np.zeros((N, M))
-        filter_psf = np.zeros((N, M))
-
-        self.remake_filters()
-
-        for d in range(0,self.D):
-            i[d,N/2-self.N/2:N/2+self.N/2,M/2-self.M/2:M/2+self.M/2] = self.i[d]
-            filter[N/2-self.N/2:N/2+self.N/2,M/2-self.M/2:M/2+self.M/2] = self.filter
-            filter_psf[N/2-self.N/2:N/2+self.N/2,M/2-self.M/2:M/2+self.M/2] = self.filter_psf
-        self.i = i
-
-        # Add the padding to the filter arrays
-        self.filter = scipy.misc.imresize(self.filter.astype('float'),(N,M),mode='F').astype('float')
-        self.filter_psf = scipy.misc.imresize(self.filter_psf.astype('float'),(N,M),mode='F').astype('float')
-        self.RHO = scipy.misc.imresize(self.RHO,(N,M),mode='F').astype('float')
-
-        # Retain the inputs for the final deconvolution
-        i = np.copy(self.i)
-
-        if self.apodize == True: # For images with bright borders apodization can help
-            apod = np.ones((N, M)) * (self.RHO < self.apod_distance)
-            apod += np.exp( - (self.RHO-self.apod_distance)** 2 / (2 * self.apod_width ** 2)) * (self.RHO > self.apod_distance)
-            for d in range(0, self.D):
-                i[d] = i[d] * apod
-
-        # Compute the OTFs and apply the filters
+        # Compute the starting OTFs
         # Generate starting OTFs - blind
-        H = np.ones((self.D, N, M), dtype='complex')
-        I = np.zeros((self.D, N, M), dtype='complex')
+        H = np.ones((self.D, self.N, self.M), dtype='complex')
+        I = np.zeros((self.D, self.N, self.M), dtype='complex')
         for d in range(0, self.D):
             I[d] = self.ift(i[d])
-            I[d] = I[d] * self.filter
-            H[d] = H[d] * self.filter_psf
-
-        # Initial O
-        O = np.ones((N, M), dtype='complex')
 
         # Main algorithm loop
         for k in range(0, self.nIter):
-            O = self.ls(H, I, self.eps)
+            # Calculate object spectrum via least-squares (P_1)
+            O = self.ls(H, I)
             for d in range(0, self.D):
-                H[d] = self.divide(I[d]*O.conj(),np.abs(O)**2)
-                H[d] = self.realize(H[d],self.filter_psf,self.psf_lb,self.psf_ub)
+                # Tangential Projection (P_3)
+                H[d] = self.divide(I[d], O)
+                # Project to OTF set (P_4)
+                alpha = np.real(self.Ainv.dot(H[d].reshape(self.N*self.M)))
+                alpha[alpha<0] = 0
+                H[d] = self.A.dot(alpha).reshape(self.N,self.M)
+            print "Iteration Number:",k+1,"/",self.nIter
 
-        # Final step: final deconvolution
-        O = np.zeros((N,M),dtype='complex')
-        O[self.RHO<2*self.aperture] = self.ls(H, I, self.eps)[self.RHO<2*self.aperture]
-        o = np.real(self.ft(O))
-        O = self.ift(o)
+        # Make PSFs and Full Size Image Spectrum
+        h = np.zeros((self.D, N, M), dtype='float')
+        H2 = np.zeros((self.D, N, M), dtype='complex')
+        I2 = np.zeros((self.D, N, M), dtype='complex')
+        for d in range(0, self.D):
+            h[d,N/2-self.N/2:N/2+self.N/2,M/2-self.M/2:N/2+self.M/2] = np.real(self.ft(H[d]))
+            h[d,h[d]<0] = 0
+            H2[d] = self.ift(h[d])
+            I2[d] = self.ift(self.i[d])
+
+        # Create final output
+        O = self.ls(H2,I2)
         o = np.real(self.ft(O))
         o[o<0] = 0
-        o = o / o.max()
 
-        # Make PSFs:
-        h = np.ones((self.D, N, M), dtype='float')
-        for d in range(0, self.D):
-            h[d] = np.real(self.ft(H[d]))
-            h[d] = h[d] * (h[d] > 0.0)
+        # Record finishing time
+        t2 = time.time()
+        print "TIP Complete. Time elapsed: {}".format(t2-t1),"seconds."
 
-        # If images are padded, it will cut the middle out
-        out = o[N/2-self.N/2:N/2+self.N/2,M/2-self.M/2:M/2+self.M/2].astype('float')
-        if self.cut == True:
-            out = out[0:self.N_o,0:self.M_o].astype('float')
+        return o, h
 
-        self.i = np.copy(i_copy)
-
-        return out, h
