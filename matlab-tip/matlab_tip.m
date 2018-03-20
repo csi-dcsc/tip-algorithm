@@ -12,15 +12,15 @@ N = 512;
 M = 512;
 D = 4;
 nIter = 10;
-psf_size = 11;
+psf_size = 15;
 compression = 1;
 eps = 1e-15;
 
 % Load images
 z = zeros(N,M,D);
-for d=0:3
-    img = im2double(imread(sprintf('inputs/mountain/%d.tif',d)));
-    img = img ./ max(max(img));
+for d=0:D-1
+    img = im2double(imread(sprintf('./inputs/mountain/%d.tif',d)));
+    img = img ./ sum(sum(img));
     z(:,:,d+1) = img;
 end
 
@@ -32,8 +32,8 @@ N = uint64(N / compression);
 M = uint64(M / compression);
 
 % Load object
-obj = im2double(imread('inputs/mountain/object.tif'));
-obj = obj ./ max(max(obj));
+obj = im2double(imread('./inputs/mountain/object.tif'));
+obj = obj ./ sum(sum(obj));
 
 % Spatial grid
 x = linspace(-1.0,1.0,N);
@@ -73,10 +73,17 @@ end
 %% Main algorithm loop
 for i=1:nIter
     O = least_squares(H, Z, eps);
+    % Renormalisation
+    O = real(ft(O));
+    O( O < 0 ) = 0;
+    O = O ./ sum(sum(abs(O)));
+    O = ift(O);
     for d=1:D
         H(:,:,d) = Z(:,:,d) ./ (O + eps);
         alpha = real(Ainv * reshape(H(:,:,d),M*N,1));
         alpha(alpha < 0) = 0;
+        % Renormalisation
+        alpha = alpha / sum(sum(abs(alpha)));
         H(:,:,d) = reshape(A * alpha,N,M);
     end
 end
@@ -151,4 +158,7 @@ subplot(3,4,12)
 title('TIP Object')
 imshow(obj, [0 1.0]);
 title('Real Object')
+
+figure;
+imshow(o, [0 1.0]);
 

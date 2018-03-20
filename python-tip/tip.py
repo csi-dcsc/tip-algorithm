@@ -73,10 +73,10 @@ class tip():
             RHO = np.sqrt(X ** 2 + Y ** 2)
 
             mask = (RHO < (float(self.psf_size) / (self.N))).astype('uint8')
-            M = int(np.sum(mask))
+            self.psf_points = int(np.sum(mask))
 
-            self.A = np.zeros((self.M * self.N, M), dtype='complex')
-            for i in range(0, M):
+            self.A = np.zeros((self.M * self.N, self.psf_points), dtype='complex')
+            for i in range(0, self.psf_points):
                 f = np.zeros((self.N, self.M))
                 px, py = np.unravel_index(np.argmax(mask), mask.shape)
                 f[px, py] = 1.0
@@ -147,12 +147,19 @@ class tip():
         for k in range(0, self.nIter):
             # Calculate object spectrum via least-squares (P_1)
             O = self.ls(H, I)
+            # Renormalise the object
+            o = np.real(self.ft(O))
+            o[o<0] = 0
+            o /= np.sum(o)
+            O = self.ift(o)
             for d in range(0, self.D):
                 # Tangential Projection (P_3)
                 H[d] = self.divide(I[d], O)
                 # Project to OTF set (P_4)
                 alpha = np.real(self.Ainv.dot(H[d].reshape(self.N*self.M)))
                 alpha[alpha<0] = 0
+                # Renormalise the PSF
+                alpha /= np.sum(alpha)
                 H[d] = self.A.dot(alpha).reshape(self.N,self.M)
             print "Iteration Number:",k+1,"/",self.nIter
 

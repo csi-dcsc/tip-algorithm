@@ -21,7 +21,7 @@ import tip
 #   compression [int] - the relative size of the subregion to use to determine PSFs (i.e. 2 = quarter the image area)
 #   interpolation [float] - change the relative size of the pixels in the images
 #   psfSize [int] - the a priori size of the PSF
-#   saveBasis [bool] - the
+#   saveBasis [bool] - whether you wish to save the basis functions
 #   ------
 #   Returns
 #   ------
@@ -29,7 +29,7 @@ import tip
 #   h [ndarray float] - the array containing the calculated PSFs (nFrames x Image X x Image Y)
 
 # Initialize the class
-tipclass = tip.tip('./inputs/mountain/',10,4,1,1.0,11,True)
+tipclass = tip.tip('inputs/mountain/',10,4,1,1.0,15,False)
 
 # Run the deconvolution
 o, h = tipclass.deconvolve()
